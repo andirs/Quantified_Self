@@ -1,0 +1,248 @@
+---
+title: "Quantified Self Quality Algorithm"
+author: "Andreas Rubin-Schwarz"
+date: "November 21, 2015"
+output: html_document
+---
+
+### Executive Summary
+This analysis shall predict, whether an individual is performing a weight lifting excercise in a correct or incorrect way. We'll analyze triple axis accelerometer data which is based on the performance of six young and healthy participants. These participants were asked to do 10 repititions of Unilateral Dumbbell Biceps Curls in five different fashions. Four of the fashions (B to E) represent common mistakes whereas one fashion (A) represents the correct way. 
+
+**Data Summary**
+
+```{r, echo = FALSE, cache = TRUE, results = "hide"}
+# Load caret package which automatically loads ggplot2 package as well
+
+packages <- c("caret",
+              "randomForest",
+              "parallel",
+              "doParallel",
+              "klaR",
+              "MASS",
+              "gbm",
+              "plyr")
+lapply(packages, require, character.only = TRUE)
+rm(packages)
+
+# Establish a working directory & check for it
+work_dir <- "/Users/andirs/Dropbox/Data Science/courses/08_PracticalMachineLearning/_project/writeup"
+
+if (getwd() != work_dir) {
+        setwd(work_dir)
+}
+rm(work_dir)
+
+# Downloading training-data
+
+if(!file.exists("files/pml-training.csv")) {
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", 
+              destfile = "files/pml-training.csv", 
+              method = "curl")
+}
+
+# Downloading testing-data
+
+if(!file.exists("files/pml-testing.csv")) {
+        download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", 
+                      destfile = "files/pml-testing.csv", 
+                      method = "curl")
+}
+
+training <- read.csv("files/pml-training.csv", na.strings = c("","#DIV/0!","NA"))
+
+```
+
+Description     | Value
+----------------| -------------
+Population      | 6
+Sex             | all male
+Age             | 20 - 28
+Sensors         | 4
+Observations    | `r dim(training)[1]`
+Variables       | `r dim(training)[2]`
+
+More information can be found here <http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises>.
+
+Our data set consists out of **`r dim(training)[1]`** observations and **`r dim(training)[2]`** variables. 
+
+### Feature Selection
+
+**Missing Values**
+
+While analyzing the raw data, we found a lot of missing values. We first delete all variables that don't contain enough information to be valuable for our prediction. 
+
+```{r, cache = TRUE}
+
+training <- read.csv("files/pml-training.csv", na.strings = c("","#DIV/0!","NA"))
+training <- training[,colSums(is.na(training))==0]
+
+```
+
+**Unrelevant Values**
+
+Afterwards we delete the first 7 columns from the remaining **`r dim(training)[2]` variables** because they don't contain any accelerometer data and are therefore not useful as predictors. 
+```{r, cache = TRUE}
+training <- training[,-c(1:7)]
+```
+
+**Low Variance**
+
+To further consolidate the data (**`r dim(training)[2]` variables**) we examine if any of the variables has near zero variance and can therefor be removed.
+
+```{r, cache = TRUE}
+zero_var <- nearZeroVar(training, saveMetrics = TRUE)
+```
+
+```{r, cache = TRUE, echo = FALSE}
+zero_var1 <- summary(zero_var$zeroVar)[2]
+zero_var2 <- summary(zero_var$nzv)[2]
+```
+
+Attribute       | No Variation?
+----------------| -------------
+zeroVar         | `r zero_var$zeroVar[2]`
+nzv             | `r zero_var$nzv[2]`
+
+```{r, cache = TRUE, echo = FALSE}
+rm(zero_var, zero_var1, zero_var2)
+```
+
+All of the **`r dim(training)[2]`** variables contain enough variability and can't be discarded.
+
+**Highly Correlated Variables**
+
+To narrow down the list of predictors we calculate correlations between the variables. We only need one of each highly correlated predictors. As a threshold we'll set 75 % of correlation.
+
+```{r, cache = TRUE, echo = FALSE, results = "hide"}
+sapply(training, mode)
+```
+
+```{r, cache = TRUE}
+corMatrix <- cor(training[,1:52])
+highlyCorrelated <- findCorrelation(corMatrix, cutoff=0.75)
+training <- training[,-highlyCorrelated]
+rm(corMatrix, highlyCorrelated)
+```
+
+This step reduced our data set to **`r dim(training)[2]` variables**.
+
+### Creating a cross-validation set
+Now that we reduced our data set to a minimum of predictors we can split the set in a training and a testing set. We'll use a 60 % (training) to 40 % (testing) ratio.
+
+```{r, cache = TRUE}
+# Create pre-testing data set
+set.seed(1337)
+inTrain <- createDataPartition(y=training$classe, p=0.6, list=FALSE)
+training <- training[inTrain,]
+testing <- training[-inTrain,]
+rm(inTrain)
+```
+
+### Prediction Algorithm
+To find the fitting model for our analysis we'll train several prediction models on our training data set. 
+
+**Decision Tree**
+
+```{r, cache = TRUE}
+set.seed(1337)
+modFitdt <- train(classe ~ ., data = training, method = "rpart")
+pred1 <- predict(modFitdt, newdata = training)
+cm1 <- confusionMatrix(pred1, training$classe)
+cm1ac <- round(cm1$overall[1]*100, 2)
+cm1er <- 100 - cm1ac
+```
+
+An accuracy of **`r cm1ac` %** brings us to the decision to go ahead and try other prediction models. 
+
+**Linear Discriminant Analysis**
+
+```{r cache = TRUE}
+cores <- detectCores()
+cl <- makeCluster(cores)
+registerDoParallel(cl)
+
+set.seed(1337)
+modFitlda <- train(classe ~., data = training, method = "lda", trControl = trainControl(allowParallel = TRUE))
+pred3 <- predict(modFitlda, newdata = training)
+cm3 <- confusionMatrix(pred3, training$classe)
+cm3ac <- round(cm3$overall[1]*100, 2)
+cm3er <- 100 - cm3ac
+```
+
+Our Linear Discriminant Analysis model has an accuracy of **`r cm3ac` %**. Still not the precision we're looking for.
+
+**Naive Bayes**
+
+```{r cache = TRUE, warning = FALSE}
+set.seed(1337)
+modFitnb <- train(classe ~., data = training, method = "nb", trControl = trainControl(method = "cv", number = 3, allowParallel = TRUE))
+pred4 <- predict(modFitnb, newdata = training)
+cm4 <- confusionMatrix(pred4, training$classe)
+cm4ac <- round(cm4$overall[1]*100, 2)
+cm4er <- 100 - cm4ac
+```
+
+Our Naive Bayes model has an accuracy of **`r cm4ac` %**. Which is better but still has an error rate of **`r cm4er` %**
+
+**Random Forest**
+
+```{r cache = TRUE}
+set.seed(1337)
+modFitrf <- train(classe ~ ., data = training, method = "rf", trControl = trainControl(method = "cv", number = 3, allowParallel = TRUE))
+pred2 <- predict(modFitrf, newdata = training)
+cm2 <- confusionMatrix(pred2, training$classe)
+cm2ac <- round(cm2$overall[1]*100, 2)
+cm2er <- 100 - cm2ac
+```
+
+Our random forest model has an accuracy of **`r cm2ac` %**.
+
+```{r, cache = TRUE}
+cm2$table
+```
+
+As we can see our random fores model predicted all training cases right. Based on our results the random forest model is our clear front-runner with a **`r cm2er` %** error rate.
+
+### Cross Validation
+As a final step we will evaluate our models based on the testing set that we defined in the beginning. 
+
+```{r, cache = TRUE, warning = FALSE}
+
+set.seed(1337)
+t_pred1 <- predict(modFitdt, newdata = testing)
+t_cm1 <- confusionMatrix(t_pred1, testing$classe)
+t_cm1er <- 100 - round(t_cm1$overall[1]*100, 2)
+
+set.seed(1337)
+t_pred3 <- predict(modFitlda, newdata = testing)
+t_cm3 <- confusionMatrix(t_pred3, testing$classe)
+t_cm3er <- 100 - round(t_cm3$overall[1]*100, 2)
+
+set.seed(1337)
+t_pred2 <- predict(modFitrf, newdata = testing)
+t_cm2 <- confusionMatrix(t_pred2, testing$classe)
+t_cm2er <- 100 - round(t_cm2$overall[1]*100, 2)
+
+set.seed(1337)
+t_pred4 <- predict(modFitnb, newdata = testing)
+t_cm4 <- confusionMatrix(t_pred4, testing$classe)
+t_cm4er <- 100 - round(t_cm4$overall[1]*100, 2)
+
+```
+
+The following table shows an overview of the In- and Out-of-Sample Error of our prediction models. 
+
+Model                         | In Sample Error               | Out of Sample Error
+----------------------------- | ----------------------------- | -----------------------------
+Decision Tree                 | `r cm1er` %                   | `r t_cm1er` %
+Linear Discriminant Analysis  | `r cm3er` %                   | `r t_cm3er` %
+Random Forest Model           | `r cm2er` %                   | `r t_cm2er` %
+Naive Bayes                   | `r cm4er` %                   | `r t_cm4er` %
+
+A look at the confusion matrix from the test case prediction with our random forest model shows that all cases have been predicted in the right way. 
+
+```{r, cache = TRUE}
+t_cm2
+```
+
+The cross validation confirms our training sample result and shows a **`r t_cm2er` %** out of sample error rate for the Random Forest Model. Through cross-validation we can assume a low out of sample error rate for additional prediction cases.
